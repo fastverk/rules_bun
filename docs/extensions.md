@@ -16,6 +16,11 @@ Pin a specific version:
 
     bun.toolchain(version = "1.3.14")
 
+The actual release fetching is delegated to
+`@rules_github//github:repositories.bzl%github_binary_repository`
+so that the URL-shape + sha-pinning logic stays consistent across
+all our rules_* repos.
+
 <a id="bun"></a>
 
 ## bun

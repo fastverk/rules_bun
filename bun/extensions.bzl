@@ -13,49 +13,34 @@ Default usage:
 Pin a specific version:
 
     bun.toolchain(version = "1.3.14")
+
+The actual release fetching is delegated to
+`@rules_github//github:repositories.bzl%github_binary_repository`
+so that the URL-shape + sha-pinning logic stays consistent across
+all our rules_* repos.
 """
 
+load(
+    "@rules_github//github:repositories.bzl",
+    "github_binary_repository",
+)
 load(
     "//bun/private:known_versions.bzl",
     "DEFAULT_VERSION",
     "KNOWN_VERSIONS",
-    "URL_TEMPLATE",
 )
 
-def _resolve_platform(rctx):
-    os = rctx.os.name.lower()
-    arch = rctx.os.arch.lower()
-    if "linux" in os and arch in ("x86_64", "amd64"):
-        return "linux-x64"
-    if "linux" in os and arch in ("aarch64", "arm64"):
-        return "linux-aarch64"
-    if ("mac" in os or "darwin" in os) and arch in ("aarch64", "arm64"):
-        return "darwin-aarch64"
-    if ("mac" in os or "darwin" in os) and arch in ("x86_64", "amd64"):
-        return "darwin-x64"
-    fail("rules_bun: unsupported platform os=%s arch=%s" % (os, arch))
+# Canonical (rules_github) -> Bun-release asset platform name.
+# Bun's release assets are named e.g. `bun-darwin-aarch64.zip`,
+# `bun-linux-x64.zip` (note `-x64`, not `-x86_64`).
+_PLATFORM_ALIASES = {
+    "darwin_aarch64": "darwin-aarch64",
+    "darwin_x86_64": "darwin-x64",
+    "linux_aarch64": "linux-aarch64",
+    "linux_x86_64": "linux-x64",
+}
 
-def _bun_repo_impl(rctx):
-    platform = _resolve_platform(rctx)
-    version = rctx.attr.version
-    sha = KNOWN_VERSIONS.get(version, {}).get(platform, "")
-    url = URL_TEMPLATE.format(version = version, platform = platform)
-    if not sha:
-        # buildifier: disable=print
-        print(("rules_bun: WARNING — no pinned sha256 for bun@{v} on {p}; " +
-               "downloading unverified. Add an entry to known_versions.bzl " +
-               "for hermetic builds.").format(v = version, p = platform))
-
-    rctx.download_and_extract(
-        url = url,
-        sha256 = sha or "",
-        # The release zip extracts to `bun-<platform>/bun`. We strip the
-        # outer dir so the binary lands at the repo root as `bun`.
-        stripPrefix = "bun-" + platform,
-    )
-
-    # Generated BUILD.bazel exposing the binary + a Bun toolchain.
-    rctx.file("BUILD.bazel", """\
+_BUN_BUILD = """\
 load("@rules_bun//bun:toolchains.bzl", "bun_toolchain")
 
 package(default_visibility = ["//visibility:public"])
@@ -72,17 +57,7 @@ toolchain(
     toolchain = ":bun_toolchain",
     toolchain_type = "@rules_bun//bun:toolchain_type",
 )
-""")
-
-_bun_repository = repository_rule(
-    implementation = _bun_repo_impl,
-    attrs = {
-        "version": attr.string(
-            mandatory = True,
-            doc = "Bun release version (e.g. \"1.3.14\"; no leading `v`).",
-        ),
-    },
-)
+"""
 
 def _bun_extension_impl(mctx):
     version = DEFAULT_VERSION
@@ -90,7 +65,23 @@ def _bun_extension_impl(mctx):
         for tag in mod.tags.toolchain:
             if tag.version:
                 version = tag.version
-    _bun_repository(name = "bun", version = version)
+
+    github_binary_repository(
+        name = "bun",
+        repo = "oven-sh/bun",
+        version = version,
+        # Bun tags releases as `bun-v<version>` (not `v<version>`).
+        tag_format = "bun-v{version}",
+        asset_template = "bun-{platform}.zip",
+        # Asset extracts to `bun-<platform>/bun`; strip the outer dir.
+        strip_prefix_template = "bun-{platform}",
+        platform_aliases = _PLATFORM_ALIASES,
+        platform_shas = KNOWN_VERSIONS.get(version, {}),
+        # Unpinned versions emit a warning instead of failing — keeps
+        # `bun.toolchain(version = "<new>")` ergonomic for bumps.
+        allow_unverified = True,
+        build_file_content = _BUN_BUILD,
+    )
 
 _toolchain_tag = tag_class(attrs = {
     "version": attr.string(
