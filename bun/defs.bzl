@@ -52,10 +52,16 @@ def _bun_test_impl(ctx):
 set -euo pipefail
 
 RUNFILES_DIR="${{RUNFILES_DIR:-$0.runfiles}}"
-BUN_BIN="${{RUNFILES_DIR}}/{bun_short}"
+# Under bzlmod the toolchain Bun is an external repo file, so its
+# short_path is `../rules_bun++bun+bun/bun`. Runfiles are rooted at the
+# main repo (`_main/`), so prefix with `_main/` — the embedded `../`
+# then resolves back out to the sibling external repo dir. (Without the
+# `_main/` prefix the `../` escapes the runfiles tree entirely.)
+BUN_BIN="${{RUNFILES_DIR}}/_main/{bun_short}"
 if [[ ! -x "$BUN_BIN" ]]; then
-  # Fallback for workspaces with non-default repo names.
-  BUN_BIN="$(find "$RUNFILES_DIR" -name bun -type f -perm -u+x | head -1)"
+  # Fallback for workspaces with non-default repo names. `-L` follows
+  # the runfiles symlink to the real (executable) Bun binary.
+  BUN_BIN="$(find -L "$RUNFILES_DIR" -name bun -type f -perm -u+x | head -1)"
 fi
 
 # Determinism + telemetry pins.
@@ -66,7 +72,7 @@ export BUN_INSTALL_NO_TRACK=1
 exec "$BUN_BIN" test {test_args}
 """.format(
             bun_short = bun.short_path,
-            test_args = " ".join(['"$0.runfiles/_main/' + a + '"' for a in test_args]),
+            test_args = " ".join(['"${RUNFILES_DIR}/_main/' + a + '"' for a in test_args]),
         ),
     )
 
