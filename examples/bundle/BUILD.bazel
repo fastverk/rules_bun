@@ -1,0 +1,39 @@
+load("@aspect_rules_js//js:defs.bzl", "js_binary")
+load("@rules_bun//bun:defs.bzl", "bun_bundle", "bun_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# The driver js_binary stages the bundle entry (the .ts sources, transpiled by
+# Bun directly) next to the linked node_modules closure in its runfiles, so when
+# `bun_bundle` runs it the whole import graph resolves from the staged tree.
+js_binary(
+    name = "bundle_driver",
+    data = [
+        "greet.ts",
+        "index.ts",
+        "//examples:node_modules/is-number",
+        "//examples:node_modules/source-map-support",
+    ],
+    entry_point = "@rules_bun//bun:bun-build-driver",
+)
+
+# Bundle examples/bundle/index.ts into one self-contained ESM file. is-number
+# and ./greet are inlined; source-map-support stays external.
+bun_bundle(
+    name = "bundle",
+    out = "app.mjs",
+    driver = ":bundle_driver",
+    entry = "examples/bundle/index.ts",
+    external = ["source-map-support"],
+    format = "esm",
+    target = "node",
+)
+
+# Smoke test: the bundle exists, runs, inlines the dep + local module, and keeps
+# the external un-inlined. Run from the `_main` runfiles root with the bundle
+# staged as data.
+bun_test(
+    name = "bundle_test",
+    srcs = ["bundle.test.ts"],
+    data = [":bundle"],
+)

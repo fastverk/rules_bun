@@ -1,0 +1,9 @@
+{
+  "name": "rules_bun-examples",
+  "version": "0.0.0",
+  "private": true,
+  "dependencies": {
+    "is-number": "7.0.0",
+    "source-map-support": "0.5.21"
+  }
+}

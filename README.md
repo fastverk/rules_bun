@@ -2,13 +2,16 @@
 
 Bazel rules for [Bun](https://bun.sh/). Fetches the prebuilt Bun binary,
 wraps it as a Bazel toolchain, and provides hermetic `bun test` +
-sandbox-escaping `bun run` runners.
+sandbox-escaping `bun run` runners, plus `bun build` bundling and
+`bun build --compile` standalone-executable rules.
 
 - **module extension**: `bun` — auto-creates `@bun` with the host-platform binary. See [docs/extensions.md](docs/extensions.md).
 - **toolchain**: `bun_toolchain` — wraps the binary; resolved via `@rules_bun//bun:toolchain_type`. See [docs/toolchains.md](docs/toolchains.md).
 - **rules**:
   - `bun_test` — runs `bun test` over listed source files as a Bazel test target.
   - `bun_run` — `bazel run //path:target` macro: invokes `bun run <script>` against the live workspace source.
+  - `bun_bundle` — bundle a JS/TS entry point into one self-contained file via `bun build`.
+  - `bun_compile` — compile a JS/TS entry point into a standalone native executable via `bun build --compile`.
 
   See [docs/defs.md](docs/defs.md).
 
@@ -24,11 +27,19 @@ common --registry=https://bcr.bazel.build/
 In your `MODULE.bazel`:
 
 ```python
-bazel_dep(name = "rules_bun", version = "0.1.0")
+bazel_dep(name = "rules_bun", version = "0.3.0")
 
 bun = use_extension("@rules_bun//bun:extensions.bzl", "bun")
 use_repo(bun, "bun")
 register_toolchains("@bun//:bun_toolchain_def")
+```
+
+`bun_bundle` / `bun_compile` additionally need `aspect_rules_js` (and a
+node toolchain) in your `MODULE.bazel` — you already have them if you
+build JS with Bazel:
+
+```python
+bazel_dep(name = "aspect_rules_js", version = "3.1.2")
 ```
 
 Pin a specific version:
@@ -65,6 +76,76 @@ bun_run(
 ```
 
 `bazel run //:build -- --watch` invokes `bun run scripts/build.ts --watch` against your live workspace source (not the Bazel sandbox). Useful for the dev loop where you want HMR / on-demand module resolution / filesystem watch outside the runfiles tree.
+
+Bundle a JS/TS entry into one file:
+
+```python
+load("@aspect_rules_js//js:defs.bzl", "js_binary")
+load("@rules_bun//bun:defs.bzl", "bun_bundle")
+
+# The driver js_binary stages the bundle entry + its full linked
+# node_modules closure into runfiles; bun_bundle runs it as a build
+# action so that closure materializes, then shells out to the hermetic
+# Bun toolchain. `data` must list the entry's :lib + every npm-link dep.
+js_binary(
+    name = "bundle_driver",
+    entry_point = "@rules_bun//bun:bun-build-driver",
+    data = [":lib", ":node_modules/pg", ":node_modules/source-map-support"],
+)
+
+bun_bundle(
+    name = "bundle",
+    driver = ":bundle_driver",
+    entry = "packages/api/index.js",
+    out = "api.mjs",
+    format = "esm",
+    # Keep native addons / runtime requires out of the bundle.
+    external = ["pg-native", "@aws-sdk/client-ssm", "encoding", "source-map-support"],
+)
+```
+
+`bazel build //:bundle` emits a single self-contained `api.mjs`. Bun
+resolves the import graph from the staged `node_modules` natively (no
+`bun install`). The `external` modules are left as runtime `require`s
+rather than inlined — provide them alongside the bundle.
+
+Compile a JS/TS entry into a standalone native executable:
+
+```python
+load("@aspect_rules_js//js:defs.bzl", "js_binary")
+load("@rules_bun//bun:defs.bzl", "bun_compile")
+
+js_binary(
+    name = "cli_driver",
+    entry_point = "@rules_bun//bun:bun-build-driver",
+    data = [":lib", ":node_modules/pg"],
+)
+
+bun_compile(
+    name = "cli",
+    driver = ":cli_driver",
+    entry = "apps/cli/index.js",
+    out = "cli",
+    # Omit `target` to compile for the host; set it to cross-compile,
+    # e.g. "bun-linux-x64-modern" for a linux OCI image.
+    target = "bun-linux-x64-modern",
+    external = ["pg-native"],
+)
+```
+
+The output is a runnable executable (`bazel run //:cli`, or drop it into
+an OCI image). `--compile` bundles the Bun runtime + your JS into one
+file. Native `.node` addons are NOT embedded — keep them `external` and
+ship the `.node` files at runtime next to the binary.
+
+> Cross-target note: on a macOS dev host, `target = ""` compiles a
+> Mach-O binary; CI on linux compiles an ELF. For a linux OCI image,
+> set `target = "bun-linux-x64-modern"` (or the `arm64` / `musl`
+> variant) explicitly so the binary matches the image regardless of
+> which host built it. A future enhancement could derive `target` from
+> the Bazel `--platforms` via a transition; for now pass the string.
+
+See [`examples/`](examples) for runnable `bun_bundle` + `bun_compile` smoke tests.
 
 ## How it works
 
