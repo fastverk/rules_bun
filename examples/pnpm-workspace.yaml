@@ -1,0 +1,5 @@
+packages: []
+
+# aspect_rules_js wants postinstall-building dependencies enumerated. Nothing in
+# this example workspace builds — is-number and source-map-support are pure JS.
+onlyBuiltDependencies: []

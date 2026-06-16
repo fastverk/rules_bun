@@ -1,0 +1,9 @@
+load("@examples_npm//:defs.bzl", "npm_link_all_packages")
+
+package(default_visibility = ["//visibility:public"])
+
+# Links the example pnpm workspace's node_modules at //examples, so Bun's
+# resolver finds it by walking up from examples/bundle/ and examples/compile/.
+npm_link_all_packages(name = "node_modules")
+
+exports_files(["pnpm-lock.yaml"])

@@ -1,6 +1,6 @@
 """User-facing rules for rules_bun.
 
-Two pieces:
+Four pieces:
 
   * `bun_test` — runs `bun test` as a hermetic Bazel test action with
     explicit srcs + deps. Returns a `BunTestInfo` provider wrapping
@@ -12,9 +12,20 @@ Two pieces:
     non-hermetic (escapes the runfiles sandbox) for the dev loop.
     Counterpart to `bun_test`'s hermetic execution.
 
-Both resolve the Bun binary via `@rules_bun//bun:toolchain_type` (set
+  * `bun_bundle` — bundle a JS/TS entry point into one self-contained
+    file with `bun build`. Returns `BunBundleInfo`.
+
+  * `bun_compile` — compile a JS/TS entry point into a standalone native
+    executable with `bun build --compile` (Bun runtime + bundled JS).
+    Returns `BunBinaryInfo` and is `bazel run`-nable.
+
+All resolve the Bun binary via `@rules_bun//bun:toolchain_type` (set
 up by `register_toolchains("@bun//:bun_toolchain_def")` in your
-MODULE.bazel).
+MODULE.bazel). `bun_bundle` / `bun_compile` additionally take a `driver`
+js_binary whose entry point is `@rules_bun//bun:bun-build-driver` and
+whose `data` stages the build entry plus its full linked node_modules
+closure — aspect_rules_js materializes that closure into the action's
+runfiles so Bun resolves the import graph natively (no `bun install`).
 """
 
 load("@rules_shell//shell:sh_binary.bzl", _sh_binary = "sh_binary")
@@ -129,3 +140,178 @@ def bun_run(name, script, args = None, **kwargs):
         },
         **kwargs
     )
+
+# -----------------------------------------------------------------------------
+# bun_bundle / bun_compile — `bun build` driven via a js_binary driver.
+# -----------------------------------------------------------------------------
+
+BunBundleInfo = provider(
+    doc = "A single-file bundle produced by `bun build`.",
+    fields = {
+        "bundle": "File: the bundled output.",
+        "format": "string: the Bun output format (esm/cjs/iife).",
+    },
+)
+
+BunBinaryInfo = provider(
+    doc = "A standalone native executable produced by `bun build --compile`.",
+    fields = {
+        "binary": "File: the standalone executable.",
+        "target": "string: the Bun compile target triple (empty = host).",
+    },
+)
+
+def _driver_args(ctx, out, compile):
+    """Build the shared `bun-build-driver` arg list for an action.
+
+    The driver (a js_binary) does NOT chdir into the `_main` runfiles root, so
+    `--bun` and `--out` are passed execroot-relative; the driver re-anchors them
+    on `$JS_BINARY__EXECROOT` (absolute) so they survive its own chdir into the
+    workspace runfiles root. `--entry` stays relative to that runfiles root.
+    """
+    args = ctx.actions.args()
+    bun = ctx.toolchains["@rules_bun//bun:toolchain_type"].buninfo.bun
+    args.add("--bun", bun.path)
+    args.add("--entry", ctx.attr.entry)
+    args.add("--out", out.path)
+    args.add("--format", ctx.attr.format if hasattr(ctx.attr, "format") else "esm")
+    args.add("--target", ctx.attr.target)
+    for ext in ctx.attr.external:
+        args.add("--external", ext)
+    if compile:
+        args.add("--compile")
+    return args, bun
+
+def _bun_bundle_impl(ctx):
+    out = ctx.outputs.out
+    args, bun = _driver_args(ctx, out, compile = False)
+
+    ctx.actions.run(
+        outputs = [out],
+        inputs = [bun],
+        executable = ctx.executable.driver,
+        arguments = [args],
+        # aspect_rules_js's js_binary launcher reads BAZEL_BINDIR at startup.
+        # "." keeps it at the `_main` runfiles root, where the linked
+        # node_modules + the bundle entry are staged.
+        env = {"BAZEL_BINDIR": "."},
+        mnemonic = "BunBundle",
+        progress_message = "Bundling %s with Bun" % ctx.label,
+    )
+
+    return [
+        DefaultInfo(files = depset([out])),
+        BunBundleInfo(bundle = out, format = ctx.attr.format),
+    ]
+
+bun_bundle = rule(
+    implementation = _bun_bundle_impl,
+    attrs = {
+        "driver": attr.label(
+            executable = True,
+            cfg = "target",
+            mandatory = True,
+            doc = "A `js_binary` whose entry point is " +
+                  "`@rules_bun//bun:bun-build-driver` and whose `data` stages " +
+                  "the bundle entry + its full linked node_modules closure. " +
+                  "Run as the action executable so its runfiles materialize.",
+        ),
+        "entry": attr.string(
+            mandatory = True,
+            doc = "Path of the entry point relative to the driver's `_main` " +
+                  "runfiles root (e.g. `packages/aion-cli/index.js`).",
+        ),
+        "out": attr.output(
+            mandatory = True,
+            doc = "The single bundled output file (conventionally `*.mjs`).",
+        ),
+        "format": attr.string(
+            default = "esm",
+            values = ["esm", "cjs", "iife"],
+            doc = "Bun `--format`. Defaults to `esm` so `import.meta` in deps " +
+                  "stays valid under Node.",
+        ),
+        "target": attr.string(
+            default = "node",
+            values = ["node", "browser", "bun"],
+            doc = "Bun `--target`: the intended execution environment for the " +
+                  "bundle. Defaults to `node`.",
+        ),
+        "external": attr.string_list(
+            default = [],
+            doc = "Module names to exclude from the bundle (passed as " +
+                  "`--external <name>`, repeatable). Use for native addons and " +
+                  "runtime `require`s that must stay external, e.g. " +
+                  "`pg-native`, `@aws-sdk/*`, `encoding`, `source-map-support`.",
+        ),
+    },
+    toolchains = ["@rules_bun//bun:toolchain_type"],
+    doc = "Bundle a JS/TS entry into one file via the hermetic Bun toolchain.",
+)
+
+def _bun_compile_impl(ctx):
+    out = ctx.outputs.out
+    args, bun = _driver_args(ctx, out, compile = True)
+
+    ctx.actions.run(
+        outputs = [out],
+        inputs = [bun],
+        executable = ctx.executable.driver,
+        arguments = [args],
+        env = {"BAZEL_BINDIR": "."},
+        mnemonic = "BunCompile",
+        progress_message = "Compiling %s with Bun" % ctx.label,
+    )
+
+    return [
+        # The output is itself the runnable executable, so `bazel run` works.
+        DefaultInfo(files = depset([out]), executable = out),
+        BunBinaryInfo(binary = out, target = ctx.attr.target),
+    ]
+
+bun_compile = rule(
+    implementation = _bun_compile_impl,
+    executable = True,
+    attrs = {
+        "driver": attr.label(
+            executable = True,
+            cfg = "target",
+            mandatory = True,
+            doc = "A `js_binary` whose entry point is " +
+                  "`@rules_bun//bun:bun-build-driver` and whose `data` stages " +
+                  "the build entry + its full linked node_modules closure. " +
+                  "Run as the action executable so its runfiles materialize.",
+        ),
+        "entry": attr.string(
+            mandatory = True,
+            doc = "Path of the entry point relative to the driver's `_main` " +
+                  "runfiles root (e.g. `apps/studio-cli/index.js`).",
+        ),
+        "out": attr.output(
+            mandatory = True,
+            doc = "The standalone executable output. On `--target " +
+                  "bun-windows-*` give it a `.exe` suffix.",
+        ),
+        "target": attr.string(
+            default = "",
+            doc = "Bun compile target triple. Empty (the default) compiles " +
+                  "for the host platform. Cross-compile values: " +
+                  "`bun-linux-x64`, `bun-linux-x64-modern`, " +
+                  "`bun-linux-x64-baseline`, `bun-linux-arm64`, " +
+                  "`bun-darwin-x64`, `bun-darwin-arm64`, `bun-windows-x64`, " +
+                  "and the `*-musl` libc variants (e.g. `bun-linux-x64-musl`). " +
+                  "A future enhancement could derive this from the Bazel " +
+                  "`--platforms` via a transition; for v1 pass the string.",
+        ),
+        "external": attr.string_list(
+            default = [],
+            doc = "Module names to keep external (`--external <name>`, " +
+                  "repeatable). NOTE: native `.node` addons are NOT embedded " +
+                  "by `--compile` — list them here and provide the `.node` " +
+                  "files at runtime alongside the produced binary.",
+        ),
+    },
+    toolchains = ["@rules_bun//bun:toolchain_type"],
+    doc = "Compile a JS/TS entry into a standalone native executable " +
+          "(Bun runtime + bundled JS) via `bun build --compile`.",
+)

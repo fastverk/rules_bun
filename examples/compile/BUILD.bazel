@@ -1,0 +1,33 @@
+load("@aspect_rules_js//js:defs.bzl", "js_binary")
+load("@rules_bun//bun:defs.bzl", "bun_compile")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Driver js_binary: stages the compile entry + its npm dep closure.
+js_binary(
+    name = "compile_driver",
+    data = [
+        "main.ts",
+        "//examples:node_modules/is-number",
+    ],
+    entry_point = "@rules_bun//bun:bun-build-driver",
+)
+
+# Compile examples/compile/main.ts into a standalone native executable for the
+# HOST platform (no `target`), so CI builds for its own OS/arch without cross
+# toolchains. The output is itself runnable: `bazel run //examples/compile:app`.
+bun_compile(
+    name = "app",
+    out = "app_host",
+    driver = ":compile_driver",
+    entry = "examples/compile/main.ts",
+)
+
+# Smoke test: the produced file is executable and runs.
+sh_test(
+    name = "app_test",
+    srcs = ["run_test.sh"],
+    args = ["$(rootpath :app)"],
+    data = [":app"],
+)

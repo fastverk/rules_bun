@@ -3,3 +3,8 @@ bazel-*
 .DS_Store
 .claude/
 MODULE.bazel.lock
+
+# Stray local pnpm installs in the example workspace (Bazel uses the
+# committed pnpm-lock.yaml; node_modules is never committed).
+node_modules/
+.pnpm-store/

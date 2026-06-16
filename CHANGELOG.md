@@ -4,6 +4,38 @@ All notable changes to rules_bun. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.3.0 — add bun_bundle + bun_compile
+
+- New `bun_bundle` rule: bundle a JS/TS entry point into one
+  self-contained file via `bun build`. Takes a `driver` js_binary
+  (entry point `@rules_bun//bun:bun-build-driver`) whose `data` stages
+  the build entry plus its full linked `node_modules` closure;
+  aspect_rules_js materializes that closure into the action's runfiles
+  so Bun resolves the import graph natively (no `bun install`). Attrs:
+  `format` (esm|cjs|iife, default `esm`), `target` (node|browser|bun,
+  default `node`), and `external` (a repeatable `--external <name>` list
+  for native addons / runtime requires like `pg-native`, `@aws-sdk/*`,
+  `encoding`, `source-map-support`). Returns `BunBundleInfo`.
+- New `bun_compile` rule: compile a JS/TS entry point into a standalone
+  native executable (Bun runtime + bundled JS) via `bun build
+  --compile`. Shares the driver with `bun_bundle` (via a `--compile`
+  flag). The output is itself runnable, so `bazel run //pkg:target`
+  works. Attrs: `target` (a Bun compile target triple such as
+  `bun-linux-x64-modern` / `bun-darwin-arm64`; empty = host platform)
+  and `external`. Returns `BunBinaryInfo`. Native `.node` addons are not
+  embedded by `--compile` — keep them `external` and ship them at
+  runtime alongside the binary.
+- `bun-build-driver.mjs`: a single shared driver for both rules, wrapped
+  in a public `js_library` at `@rules_bun//bun:bun-build-driver`. It
+  re-anchors `--bun`/`--out` on `$JS_BINARY__EXECROOT`, chdirs into the
+  `_main` runfiles root, and invokes the hermetic Bun toolchain.
+- `aspect_rules_js` is now a (non-dev) `bazel_dep` — consumers already
+  bring it to declare the driver js_binary.
+- `examples/`: a `bun_bundle` smoke test (npm dep + local module + one
+  `external`, asserts the bundle runs and the external is not inlined)
+  and a host-target `bun_compile` smoke test (asserts the produced file
+  is executable and runs). CI now runs `bazel test //...`.
+
 ## 0.2.1 — fix bun_test toolchain runfiles path under bzlmod
 
 - `bun_test`'s generated runner failed to locate the hermetic Bun binary

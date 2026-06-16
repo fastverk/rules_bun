@@ -1,3 +1,4 @@
+load("@aspect_rules_js//js:defs.bzl", "js_library")
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
 
 package(default_visibility = ["//visibility:public"])
@@ -8,7 +9,17 @@ exports_files([
     "defs.bzl",
     "extensions.bzl",
     "toolchains.bzl",
+    "bun-build-driver.mjs",
 ])
+
+# The shared `bun build` driver for `bun_bundle` / `bun_compile`, wrapped as a
+# js_library so a consumer package's `driver` js_binary can reference it as a
+# cross-package `entry_point`. aspect_rules_js requires entry-point sources that
+# live outside the binary's own package to be copied to bin via a js_library.
+js_library(
+    name = "bun-build-driver",
+    srcs = ["bun-build-driver.mjs"],
+)
 
 bzl_library(
     name = "defs_bzl",
