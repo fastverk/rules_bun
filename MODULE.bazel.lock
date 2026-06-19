@@ -220,8 +220,8 @@
   "moduleExtensions": {
     "//bun:extensions.bzl%bun": {
       "general": {
-        "bzlTransitiveDigest": "aqoeAlIndlv3npHmbIcZP13qDMCNVhKeScpwlzRhZbo=",
-        "usagesDigest": "lYKOt5ajk2aRJ/IjKwHw4uqSlCwwUPsWu2MdMGau8O0=",
+        "bzlTransitiveDigest": "Ibj7BPPB6zc0P+Q7j5iS5Yc5kszjhqKU6cO86iMOdAM=",
+        "usagesDigest": "PqaKXHg/t8q7jjE63L9fy6KRcChXsiHYON8i87VAU+Y=",
         "recordedInputs": [
           "REPO_MAPPING:,rules_github rules_github+"
         ],
@@ -248,6 +248,28 @@
               },
               "allow_unverified": true,
               "build_file_content": "load(\"@rules_bun//bun:toolchains.bzl\", \"bun_toolchain\")\n\npackage(default_visibility = [\"//visibility:public\"])\n\nexports_files([\"bun\"])\n\nbun_toolchain(\n    name = \"bun_toolchain\",\n    bun = \":bun\",\n)\n\ntoolchain(\n    name = \"bun_toolchain_def\",\n    toolchain = \":bun_toolchain\",\n    toolchain_type = \"@rules_bun//bun:toolchain_type\",\n)\n"
+            }
+          }
+        }
+      }
+    },
+    "//bun:extensions.bzl%bun_deps": {
+      "general": {
+        "bzlTransitiveDigest": "Ibj7BPPB6zc0P+Q7j5iS5Yc5kszjhqKU6cO86iMOdAM=",
+        "usagesDigest": "w+fmDaWINO7V//cMeqUr7BQV9kBBUN8nW3FjUbQn1w4=",
+        "recordedInputs": [
+          "REPO_MAPPING:,rules_github rules_github+"
+        ],
+        "generatedRepoSpecs": {
+          "install_npm": {
+            "repoRuleId": "@@//bun/private:install.bzl%bun_install",
+            "attributes": {
+              "package_json": "@@//examples/install:package.json",
+              "lock": "@@//examples/install:bun.lock",
+              "bun_version": "",
+              "ignore_scripts": true,
+              "trusted_dependencies": [],
+              "install_flags": []
             }
           }
         }
@@ -334,7 +356,7 @@
     "@@rules_nodejs+//nodejs:extensions.bzl%node": {
       "general": {
         "bzlTransitiveDigest": "oZFClfRhTTwsYzpxVPkOpOt/r0+OzEfEV37au0jFZ0s=",
-        "usagesDigest": "rvu8VLzBvH89Q1aJeTb6zfcrsgLI+xy60pETTB1usAk=",
+        "usagesDigest": "5MC1oU+kYY9NXGiYQabVbDvHbriinEHqUWoC4Uo3YUg=",
         "recordedInputs": [],
         "generatedRepoSpecs": {
           "nodejs_linux_amd64": {

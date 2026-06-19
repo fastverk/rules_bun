@@ -33,6 +33,7 @@ bzl_library(
     srcs = ["extensions.bzl"],
     visibility = ["//docs:__pkg__"],
     deps = [
+        "//bun/private:install_bzl",
         "//bun/private:known_versions_bzl",
         "@rules_github//github:repositories_bzl",
     ],

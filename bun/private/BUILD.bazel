@@ -1,10 +1,30 @@
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
-package(default_visibility = ["//bun:__pkg__"])
+package(default_visibility = ["//visibility:public"])
 
 bzl_library(
     name = "known_versions_bzl",
     srcs = ["known_versions.bzl"],
+    visibility = ["//bun:__subpackages__"],
 )
 
-exports_files(["bun_run.sh"])
+bzl_library(
+    name = "install_bzl",
+    srcs = ["install.bzl"],
+    visibility = ["//bun:__subpackages__"],
+    deps = [":known_versions_bzl"],
+)
+
+exports_files([
+    "bun_run.sh",
+    "bun_build_native.sh",
+])
+
+# Bun-native (no-aspect) build driver: symlinks the staged node_modules to the
+# execroot root and shells out to the toolchain Bun. Used as the `_native_driver`
+# of bun_bundle / bun_compile on the `node_modules` path.
+sh_binary(
+    name = "bun_build_native",
+    srcs = ["bun_build_native.sh"],
+)

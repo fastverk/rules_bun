@@ -1,6 +1,6 @@
 module(
     name = "rules_bun",
-    version = "0.3.0",
+    version = "0.4.0",
     compatibility_level = 1,
 )
 
@@ -59,3 +59,19 @@ register_toolchains(
     "@bun//:bun_toolchain_def",
     dev_dependency = True,
 )
+
+# Dev-only end-to-end smoke for the PURE-BUN flow (no aspect_rules_js, no
+# pnpm-lock): `bun_deps.install` stages node_modules from the example's
+# package.json + bun.lock, consumed by //examples/install's bun_bundle +
+# bun_test. This is the proof the bun_install flow works end-to-end.
+bun_deps = use_extension(
+    "@rules_bun//bun:extensions.bzl",
+    "bun_deps",
+    dev_dependency = True,
+)
+bun_deps.install(
+    name = "install_npm",
+    lock = "//examples/install:bun.lock",
+    package_json = "//examples/install:package.json",
+)
+use_repo(bun_deps, "install_npm")

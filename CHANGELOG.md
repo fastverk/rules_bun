@@ -4,6 +4,45 @@ All notable changes to rules_bun. The format is loosely
 [Keep a Changelog](https://keepachangelog.com/) — version headers
 mirror the published bazel-registry entries.
 
+## 0.4.0 — add bun_install (Bun-native node_modules; drop pnpm + aspect_rules_js)
+
+- New `bun_deps` module extension with an `install` tag — a Bun-native
+  replacement for aspect_rules_js's `npm_translate_lock` +
+  `npm_link_all_packages`. `bun_deps.install(name, package_json, lock)`
+  produces a repo `@<name>` whose `:node_modules` filegroup is an
+  installed `node_modules` tree. The backing repo rule (`bun_install`)
+  fetches a host-platform Bun (the same sha-pinned binary the toolchain
+  extension uses, via `known_versions.bzl`), copies the consumer's
+  `package.json` + `bun.lock` into the repo root, and runs `bun install
+  --frozen-lockfile --no-progress` with a repo-pinned
+  `BUN_INSTALL_CACHE_DIR` and `--ignore-scripts` (opt back in per package
+  via `trusted_dependencies`). `package.json` + `bun.lock` are read as
+  rule inputs so edits re-trigger the install; determinism comes from the
+  lockfile (the only network I/O is the registry fetch the lock pins,
+  exactly like aspect's npm extension + `http_archive`). So a pure-Bun
+  repo needs ONLY `package.json` + `bun.lock` — no pnpm-lock, no
+  aspect_rules_js.
+- `bun_test` gains an optional `node_modules` attr (a
+  `@<name>//:node_modules` label). When set, the closure is staged so
+  `bun test` resolves dependency imports with no `bun install`. Because
+  Bazel stages the test files as symlinks into the read-only source tree
+  and Bun's resolver follows an entry's realpath, the runner copies the
+  test files into a real staging dir and symlinks `node_modules` at its
+  root so resolution stays inside the staged tree.
+- `bun_bundle` + `bun_compile` gain a Bun-native path: pass `node_modules`
+  (+ `srcs` for the entry + local modules) instead of a `driver`
+  js_binary. On this path `bun build` runs directly via the toolchain Bun
+  (no js_binary driver, no aspect_rules_js) — a small shell driver stages
+  the entry into a real tree and symlinks the closure so Bun resolves the
+  import graph. `driver` is now optional and mutually exclusive with
+  `node_modules`; the legacy aspect path is unchanged for back-compat.
+- `examples/install/`: a pure-Bun end-to-end smoke (one npm dep
+  `is-number`, a local module) with `package.json` + `bun.lock`, a
+  `bun_deps.install`, and a `bun_bundle` + two `bun_test`s consuming
+  `@install_npm//:node_modules` — NO aspect_rules_js, NO pnpm-lock. Proves
+  the flow: `bazel build //examples/install:bundle` +
+  `bazel test //examples/install:resolve_test //examples/install:bundle_test`.
+
 ## 0.3.0 — add bun_bundle + bun_compile
 
 - New `bun_bundle` rule: bundle a JS/TS entry point into one

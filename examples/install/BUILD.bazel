@@ -1,0 +1,44 @@
+load("@rules_bun//bun:defs.bzl", "bun_bundle", "bun_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# Pure-Bun flow: NO aspect_rules_js, NO pnpm-lock. The node_modules closure is
+# staged by `bun_deps.install` (see //MODULE.bazel) from this directory's
+# package.json + bun.lock via `bun install --frozen-lockfile`, and consumed
+# below as `@install_npm//:node_modules`.
+
+# Bundle examples/install/index.ts into one self-contained ESM file. `is-number`
+# (from the staged node_modules) and `./greet` are inlined — Bun runs directly
+# via the toolchain (no js_binary driver). This is the `node_modules`/native
+# `bun_bundle` path.
+bun_bundle(
+    name = "bundle",
+    srcs = [
+        "greet.ts",
+        "index.ts",
+    ],
+    out = "app.mjs",
+    entry = "examples/install/index.ts",
+    format = "esm",
+    node_modules = "@install_npm//:node_modules",
+    target = "node",
+)
+
+# Proof that `bun test` resolves a dep from the `bun_install` node_modules tree.
+bun_test(
+    name = "resolve_test",
+    srcs = ["resolve.test.ts"],
+    node_modules = "@install_npm//:node_modules",
+)
+
+# Smoke test that the produced bundle exists, runs, and inlined the dep.
+bun_test(
+    name = "bundle_test",
+    srcs = ["bundle.test.ts"],
+    data = [":bundle"],
+)
+
+exports_files([
+    "package.json",
+    "bun.lock",
+])

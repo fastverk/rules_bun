@@ -21,11 +21,24 @@ Four pieces:
 
 All resolve the Bun binary via `@rules_bun//bun:toolchain_type` (set
 up by `register_toolchains("@bun//:bun_toolchain_def")` in your
-MODULE.bazel). `bun_bundle` / `bun_compile` additionally take a `driver`
-js_binary whose entry point is `@rules_bun//bun:bun-build-driver` and
-whose `data` stages the build entry plus its full linked node_modules
-closure — aspect_rules_js materializes that closure into the action's
-runfiles so Bun resolves the import graph natively (no `bun install`).
+MODULE.bazel).
+
+`bun_bundle` / `bun_compile` have two ways to provision node_modules:
+
+  * Bun-native (recommended; no aspect_rules_js, no pnpm-lock): pass a
+    `node_modules` label (a `@<name>//:node_modules` from a
+    `bun_deps.install` tag — see `extensions.bzl`) plus `srcs` (the entry
+    + local modules). `bun build` runs directly via the toolchain Bun; a
+    small shell driver stages the entry into a real tree and symlinks the
+    closure so Bun resolves the import graph natively.
+
+  * Legacy aspect_rules_js: pass a `driver` js_binary whose entry point
+    is `@rules_bun//bun:bun-build-driver` and whose `data` stages the
+    build entry plus its full linked node_modules closure; aspect
+    materializes that closure into the action runfiles.
+
+`driver` and `node_modules` are mutually exclusive — set exactly one.
+`bun_test` likewise takes an optional `node_modules` for dep resolution.
 """
 
 load("@rules_shell//shell:sh_binary.bzl", _sh_binary = "sh_binary")
@@ -41,14 +54,35 @@ BunTestInfo = provider(
 # bun_test — hermetic `bun test` as a Bazel test.
 # -----------------------------------------------------------------------------
 
+def _node_modules_parent_short(ctx):
+    """The runfiles-root-relative dir CONTAINING the `node_modules` closure.
+
+    The `node_modules` filegroup's files live in an external repo, so their
+    `short_path` is `../<canonical>/node_modules/<pkg>/...`. Return the prefix
+    up to (not including) the `node_modules/` component, runfiles-relative, so
+    the runner can symlink that dir's `node_modules` into the test staging
+    tree. ("" when no node_modules given.)
+    """
+    if not ctx.attr.node_modules:
+        return "", []
+    files = ctx.files.node_modules
+    parent = ""
+    for f in files:
+        sp = f.short_path
+        idx = sp.find("/node_modules/")
+        if idx != -1:
+            parent = sp[:idx]
+            break
+    return parent, files
+
 def _bun_test_impl(ctx):
     bun = ctx.toolchains["@rules_bun//bun:toolchain_type"].buninfo.bun
 
     # Bun's test runner accepts a list of files / glob patterns. We
     # pass all `srcs` explicitly so Bazel sees the exact inputs.
-    test_args = []
-    for src in ctx.files.srcs:
-        test_args.append(src.short_path)
+    test_args = [src.short_path for src in ctx.files.srcs]
+
+    nm_parent, nm_files = _node_modules_parent_short(ctx)
 
     # Build the runner script. Bun reads `bunfig.toml` from the cwd if
     # present; we put it in the sandbox alongside the test files so
@@ -80,14 +114,49 @@ export NO_COLOR=1
 export DO_NOT_TRACK=1
 export BUN_INSTALL_NO_TRACK=1
 
+WORKSPACE_ROOT="${{RUNFILES_DIR}}/_main"
+NM_PARENT="{nm_parent}"
+
+if [[ -n "$NM_PARENT" ]]; then
+  # `node_modules` was provided. Bazel stages the test files as SYMLINKS into
+  # the read-only source tree; `bun test` resolves a test file's realpath and
+  # then looks for `node_modules` next to that REAL file (in the workspace,
+  # where there is none). So materialize a real staging tree: copy each test
+  # file (dereferencing the symlink) to its workspace-relative path, symlink
+  # the staged node_modules at the staging root, and run from there so Bun
+  # walks up from the (real) test file into the (real) node_modules.
+  STAGE="$(mktemp -d "${{TMPDIR:-/tmp}}/bun_test.XXXXXX")"
+  trap 'rm -rf "$STAGE"' EXIT
+  for f in {test_args}; do
+    mkdir -p "$STAGE/$(dirname "$f")"
+    cp -L "${{WORKSPACE_ROOT}}/$f" "$STAGE/$f"
+  done
+  # NM_PARENT is the closure's short_path prefix (`../<canonical>` for an
+  # external repo). As with BUN_BIN, prefix `_main/` so the embedded `../`
+  # resolves back out to the sibling external repo dir under RUNFILES_DIR.
+  NM_SRC="${{WORKSPACE_ROOT}}/${{NM_PARENT}}/node_modules"
+  if [[ ! -d "$NM_SRC" ]]; then
+    # Fallback for non-default repo names: locate the staged node_modules.
+    NM_SRC="$(find -L "$RUNFILES_DIR" -type d -name node_modules | head -1)"
+  fi
+  ln -s "$NM_SRC" "$STAGE/node_modules"
+  cd "$STAGE"
+else
+  # No node_modules: run from the workspace runfiles root (back-compat).
+  cd "$WORKSPACE_ROOT"
+fi
+
 exec "$BUN_BIN" test {test_args}
 """.format(
             bun_short = bun.short_path,
-            test_args = " ".join(['"${RUNFILES_DIR}/_main/' + a + '"' for a in test_args]),
+            nm_parent = nm_parent,
+            test_args = " ".join(['"' + a + '"' for a in test_args]),
         ),
     )
 
-    runfiles = ctx.runfiles(files = [bun] + ctx.files.srcs + ctx.files.data)
+    runfiles = ctx.runfiles(
+        files = [bun] + ctx.files.srcs + ctx.files.data + nm_files,
+    )
     return [
         DefaultInfo(executable = runner, runfiles = runfiles),
     ]
@@ -106,6 +175,15 @@ bun_test = rule(
         "data": attr.label_list(
             allow_files = True,
             doc = "Additional runtime inputs (fixtures, bunfig.toml, etc.).",
+        ),
+        "node_modules": attr.label(
+            allow_files = True,
+            doc = "Optional `node_modules` closure (typically " +
+                  "`@<name>//:node_modules` from a `bun_deps.install` tag). " +
+                  "Staged at the workspace runfiles root as `node_modules/` so " +
+                  "`bun test` resolves dependency imports without `bun install`. " +
+                  "The Bun-native replacement for aspect_rules_js's " +
+                  "`npm_link_all_packages`.",
         ),
     },
     toolchains = ["@rules_bun//bun:toolchain_type"],
@@ -182,27 +260,99 @@ def _driver_args(ctx, out, compile):
         args.add("--compile")
     return args, bun
 
-def _bun_bundle_impl(ctx):
-    out = ctx.outputs.out
-    args, bun = _driver_args(ctx, out, compile = False)
+def _node_modules_parent(ctx):
+    """The execroot-relative dir CONTAINING the staged `node_modules`.
+
+    The `node_modules` filegroup's files live at `<parent>/node_modules/...`
+    in the execroot (for `@npm//:node_modules`, `<parent>` is the external
+    repo root). The native build driver symlinks `<parent>/node_modules` to
+    `./node_modules` at the execroot root so Bun's resolver walks up into it.
+    Returns ("" , []) when no node_modules is given.
+    """
+    if not ctx.attr.node_modules:
+        return "", []
+    files = ctx.files.node_modules
+    parent = ""
+    for f in files:
+        idx = f.path.find("/node_modules/")
+        if idx != -1:
+            parent = f.path[:idx]
+            break
+    return parent, files
+
+def _native_build(ctx, out, compile, mnemonic, progress):
+    """Run `bun build` directly via the toolchain — no js_binary, no aspect.
+
+    Stages the entry (+ local srcs) and the `node_modules` closure as action
+    inputs and shells through `bun_build_native.sh`, which symlinks
+    node_modules to the execroot root before invoking Bun.
+    """
+    bun = ctx.toolchains["@rules_bun//bun:toolchain_type"].buninfo.bun
+    nm_parent, nm_files = _node_modules_parent(ctx)
+
+    # The build entry + local modules, as workspace-relative paths the driver
+    # copies into a real staging tree (Bazel stages them as symlinks into the
+    # read-only source tree, which Bun's realpath resolver would otherwise
+    # escape — see bun_build_native.sh).
+    srcs_list = "\n".join([s.short_path for s in ctx.files.srcs])
+
+    args = ctx.actions.args()
+    args.add(bun.path)
+    args.add(ctx.attr.entry)
+    args.add(out.path)
+    args.add(nm_parent)
+    args.add("compile" if compile else "bundle")
+    args.add(ctx.attr.format if hasattr(ctx.attr, "format") else "esm")
+    args.add(ctx.attr.target)
+    args.add(srcs_list)
+    for ext in ctx.attr.external:
+        args.add("--external")
+        args.add(ext)
 
     ctx.actions.run(
         outputs = [out],
-        inputs = [bun],
-        executable = ctx.executable.driver,
+        inputs = depset([bun] + ctx.files.srcs + nm_files),
+        executable = ctx.executable._native_driver,
         arguments = [args],
-        # aspect_rules_js's js_binary launcher reads BAZEL_BINDIR at startup.
-        # "." keeps it at the `_main` runfiles root, where the linked
-        # node_modules + the bundle entry are staged.
-        env = {"BAZEL_BINDIR": "."},
-        mnemonic = "BunBundle",
-        progress_message = "Bundling %s with Bun" % ctx.label,
+        mnemonic = mnemonic,
+        progress_message = "%s %s with Bun (native)" % (progress, ctx.label),
     )
+
+def _bun_bundle_impl(ctx):
+    out = ctx.outputs.out
+    _validate_build_mode(ctx)
+
+    if ctx.attr.node_modules or not ctx.attr.driver:
+        _native_build(ctx, out, compile = False, mnemonic = "BunBundle", progress = "Bundling")
+    else:
+        args, bun = _driver_args(ctx, out, compile = False)
+        ctx.actions.run(
+            outputs = [out],
+            inputs = [bun],
+            executable = ctx.executable.driver,
+            arguments = [args],
+            # aspect_rules_js's js_binary launcher reads BAZEL_BINDIR at startup.
+            # "." keeps it at the `_main` runfiles root, where the linked
+            # node_modules + the bundle entry are staged.
+            env = {"BAZEL_BINDIR": "."},
+            mnemonic = "BunBundle",
+            progress_message = "Bundling %s with Bun" % ctx.label,
+        )
 
     return [
         DefaultInfo(files = depset([out])),
         BunBundleInfo(bundle = out, format = ctx.attr.format),
     ]
+
+def _validate_build_mode(ctx):
+    """Require exactly one build path: `driver` (aspect) xor `node_modules` (native)."""
+    if ctx.attr.driver and ctx.attr.node_modules:
+        fail(("%s: set EITHER `driver` (aspect_rules_js path) OR " +
+              "`node_modules` (Bun-native path), not both.") % ctx.label)
+    if not ctx.attr.driver and not ctx.attr.node_modules:
+        fail(("%s: set `node_modules` (a `@<name>//:node_modules` from " +
+              "`bun_deps.install`) for the Bun-native path, or `driver` (a " +
+              "js_binary) for the legacy aspect_rules_js path.") % ctx.label)
 
 bun_bundle = rule(
     implementation = _bun_bundle_impl,
@@ -210,16 +360,37 @@ bun_bundle = rule(
         "driver": attr.label(
             executable = True,
             cfg = "target",
-            mandatory = True,
-            doc = "A `js_binary` whose entry point is " +
-                  "`@rules_bun//bun:bun-build-driver` and whose `data` stages " +
-                  "the bundle entry + its full linked node_modules closure. " +
-                  "Run as the action executable so its runfiles materialize.",
+            doc = "LEGACY aspect_rules_js path. A `js_binary` whose entry " +
+                  "point is `@rules_bun//bun:bun-build-driver` and whose " +
+                  "`data` stages the bundle entry + its full linked " +
+                  "node_modules closure. Mutually exclusive with " +
+                  "`node_modules`; set exactly one.",
+        ),
+        "node_modules": attr.label(
+            allow_files = True,
+            doc = "Bun-native path. A `node_modules` closure (typically " +
+                  "`@<name>//:node_modules` from a `bun_deps.install` tag). " +
+                  "When set, `bun build` runs directly via the toolchain Bun " +
+                  "(no js_binary driver, no aspect_rules_js): the closure is " +
+                  "symlinked to the execroot root so Bun resolves the import " +
+                  "graph by walking up from `entry`. Mutually exclusive with " +
+                  "`driver`. Pair with `srcs` (the entry + local modules).",
+        ),
+        "srcs": attr.label_list(
+            allow_files = True,
+            default = [],
+            doc = "Bun-native path. The entry file + any local modules it " +
+                  "imports, declared as action inputs. Ignored on the legacy " +
+                  "`driver` path (that stages sources via the js_binary's " +
+                  "`data`).",
         ),
         "entry": attr.string(
             mandatory = True,
-            doc = "Path of the entry point relative to the driver's `_main` " +
-                  "runfiles root (e.g. `packages/aion-cli/index.js`).",
+            doc = "Path of the entry point relative to the workspace root " +
+                  "(e.g. `packages/aion-cli/index.js`). On the native path " +
+                  "this is the execroot-relative path; on the legacy path it " +
+                  "is relative to the driver's `_main` runfiles root (same " +
+                  "string in practice).",
         ),
         "out": attr.output(
             mandatory = True,
@@ -244,24 +415,36 @@ bun_bundle = rule(
                   "runtime `require`s that must stay external, e.g. " +
                   "`pg-native`, `@aws-sdk/*`, `encoding`, `source-map-support`.",
         ),
+        "_native_driver": attr.label(
+            default = "@rules_bun//bun/private:bun_build_native",
+            executable = True,
+            cfg = "exec",
+            doc = "The Bun-native (no-aspect) build driver shell script.",
+        ),
     },
     toolchains = ["@rules_bun//bun:toolchain_type"],
-    doc = "Bundle a JS/TS entry into one file via the hermetic Bun toolchain.",
+    doc = "Bundle a JS/TS entry into one file via the hermetic Bun toolchain. " +
+          "Either Bun-native (`node_modules` from `bun_deps.install`, no " +
+          "aspect_rules_js) or the legacy aspect `driver` js_binary path.",
 )
 
 def _bun_compile_impl(ctx):
     out = ctx.outputs.out
-    args, bun = _driver_args(ctx, out, compile = True)
+    _validate_build_mode(ctx)
 
-    ctx.actions.run(
-        outputs = [out],
-        inputs = [bun],
-        executable = ctx.executable.driver,
-        arguments = [args],
-        env = {"BAZEL_BINDIR": "."},
-        mnemonic = "BunCompile",
-        progress_message = "Compiling %s with Bun" % ctx.label,
-    )
+    if ctx.attr.node_modules or not ctx.attr.driver:
+        _native_build(ctx, out, compile = True, mnemonic = "BunCompile", progress = "Compiling")
+    else:
+        args, bun = _driver_args(ctx, out, compile = True)
+        ctx.actions.run(
+            outputs = [out],
+            inputs = [bun],
+            executable = ctx.executable.driver,
+            arguments = [args],
+            env = {"BAZEL_BINDIR": "."},
+            mnemonic = "BunCompile",
+            progress_message = "Compiling %s with Bun" % ctx.label,
+        )
 
     return [
         # The output is itself the runnable executable, so `bazel run` works.
@@ -276,16 +459,31 @@ bun_compile = rule(
         "driver": attr.label(
             executable = True,
             cfg = "target",
-            mandatory = True,
-            doc = "A `js_binary` whose entry point is " +
-                  "`@rules_bun//bun:bun-build-driver` and whose `data` stages " +
-                  "the build entry + its full linked node_modules closure. " +
-                  "Run as the action executable so its runfiles materialize.",
+            doc = "LEGACY aspect_rules_js path. A `js_binary` whose entry " +
+                  "point is `@rules_bun//bun:bun-build-driver` and whose " +
+                  "`data` stages the build entry + its full linked " +
+                  "node_modules closure. Mutually exclusive with " +
+                  "`node_modules`; set exactly one.",
+        ),
+        "node_modules": attr.label(
+            allow_files = True,
+            doc = "Bun-native path. A `node_modules` closure (typically " +
+                  "`@<name>//:node_modules` from a `bun_deps.install` tag). " +
+                  "When set, `bun build --compile` runs directly via the " +
+                  "toolchain Bun (no js_binary driver, no aspect_rules_js). " +
+                  "Mutually exclusive with `driver`. Pair with `srcs`.",
+        ),
+        "srcs": attr.label_list(
+            allow_files = True,
+            default = [],
+            doc = "Bun-native path. The entry file + any local modules it " +
+                  "imports, declared as action inputs. Ignored on the legacy " +
+                  "`driver` path.",
         ),
         "entry": attr.string(
             mandatory = True,
-            doc = "Path of the entry point relative to the driver's `_main` " +
-                  "runfiles root (e.g. `apps/studio-cli/index.js`).",
+            doc = "Path of the entry point relative to the workspace root " +
+                  "(e.g. `apps/studio-cli/index.js`).",
         ),
         "out": attr.output(
             mandatory = True,
@@ -310,8 +508,15 @@ bun_compile = rule(
                   "by `--compile` — list them here and provide the `.node` " +
                   "files at runtime alongside the produced binary.",
         ),
+        "_native_driver": attr.label(
+            default = "@rules_bun//bun/private:bun_build_native",
+            executable = True,
+            cfg = "exec",
+            doc = "The Bun-native (no-aspect) build driver shell script.",
+        ),
     },
     toolchains = ["@rules_bun//bun:toolchain_type"],
     doc = "Compile a JS/TS entry into a standalone native executable " +
-          "(Bun runtime + bundled JS) via `bun build --compile`.",
+          "(Bun runtime + bundled JS) via `bun build --compile`. Either " +
+          "Bun-native (`node_modules`) or the legacy aspect `driver` path.",
 )

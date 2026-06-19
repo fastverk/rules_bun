@@ -8,7 +8,7 @@ import isNumber from "is-number";
 const arg = process.argv[2];
 
 if (arg === "--version") {
-  console.log("rules_bun-compile-example 0.3.0");
+  console.log("rules_bun-compile-example 0.4.0");
   process.exit(0);
 }
 
