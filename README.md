@@ -26,7 +26,7 @@ sandbox-escaping `bun run` runners, plus `bun build` bundling and
 Add the registry to your `.bazelrc`:
 
 ```
-common --registry=https://raw.githubusercontent.com/fastverk/bazel-registry/main/
+common --registry=https://registry.fastverk.com/
 common --registry=https://bcr.bazel.build/
 ```
 
