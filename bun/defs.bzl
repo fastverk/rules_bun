@@ -54,6 +54,41 @@ BunTestInfo = provider(
 # bun_test — hermetic `bun test` as a Bazel test.
 # -----------------------------------------------------------------------------
 
+def _pick_node_modules_parent(ctx, paths):
+    """Choose the dir CONTAINING the `node_modules` the CONSUMER should resolve against.
+
+    With an aspect_rules_js closure the filegroup carries TWO kinds of path:
+
+      <bin>/<package>/node_modules/<pkg>                  the consumer's flat links
+      <bin>/node_modules/.aspect_rules_js/<pkg>@<v>/...   the shared package store
+
+    Only the first resolves bare imports; the store holds versioned directories.
+    Taking whichever appears first is a coin flip, and in a monorepo the store
+    usually wins — every `import "react"` then fails to resolve, because the
+    driver symlinks a tree with no flat links in it.
+
+    This was invisible while each consumer was its own workspace root: there
+    `<package>` is "" so both forms collapse to `<bin>`, and the store doubled as
+    the link tree. Once consumers are nested packages the two diverge.
+
+    So: prefer the candidate ending in the consuming package's path, and fall
+    back to the first match, which preserves the old behaviour for a root-package
+    consumer and for the Bun-native `@<name>//:node_modules` case (an external
+    repo root, where no candidate carries the package suffix).
+    """
+    suffix = "/" + ctx.label.package if ctx.label.package else ""
+    fallback = ""
+    for p in paths:
+        idx = p.find("/node_modules/")
+        if idx == -1:
+            continue
+        parent = p[:idx]
+        if suffix and parent.endswith(suffix):
+            return parent
+        if not fallback:
+            fallback = parent
+    return fallback
+
 def _node_modules_parent_short(ctx):
     """The runfiles-root-relative dir CONTAINING the `node_modules` closure.
 
@@ -65,15 +100,10 @@ def _node_modules_parent_short(ctx):
     """
     if not ctx.attr.node_modules:
         return "", []
-    files = ctx.files.node_modules
-    parent = ""
-    for f in files:
-        sp = f.short_path
-        idx = sp.find("/node_modules/")
-        if idx != -1:
-            parent = sp[:idx]
-            break
-    return parent, files
+    return _pick_node_modules_parent(
+        ctx,
+        [f.short_path for f in ctx.files.node_modules],
+    ), ctx.files.node_modules
 
 def _bun_test_impl(ctx):
     bun = ctx.toolchains["@rules_bun//bun:toolchain_type"].buninfo.bun
@@ -271,14 +301,10 @@ def _node_modules_parent(ctx):
     """
     if not ctx.attr.node_modules:
         return "", []
-    files = ctx.files.node_modules
-    parent = ""
-    for f in files:
-        idx = f.path.find("/node_modules/")
-        if idx != -1:
-            parent = f.path[:idx]
-            break
-    return parent, files
+    return _pick_node_modules_parent(
+        ctx,
+        [f.path for f in ctx.files.node_modules],
+    ), ctx.files.node_modules
 
 def _native_build(ctx, out, compile, mnemonic, progress):
     """Run `bun build` directly via the toolchain — no js_binary, no aspect.
